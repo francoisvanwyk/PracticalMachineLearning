@@ -9,22 +9,144 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+##Objective
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+The objective of this project is to predict how well someone performed an exercise based on data collected from accelerometers worn by 6 participants. A machine learning technique needs to be used to train on a set of data and then to predict on a set of data where we don't know the actual outcome.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+The dataset was created by: Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6. 
+##Libraries
 
-```{r cars}
-summary(cars)
+The following libraries were used in this exercise.
+
+```{r, warning=FALSE, message=FALSE}
+library(caret)
+library(rpart)
+library(gbm)
+library(funModeling)
+library(RANN)
+library(VIM)
 ```
 
-## Including Plots
+##Data
 
-You can also embed plots, for example:
+###Import and Clean Data
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+The first step in the process is to import the data and perform some initial analyses. 
+
+```{r, eval=FALSE}
+training = read.csv("C:/Francois/Francois/Coursera/John Hopkins Data Science Specialization/Final Project/pml-training.csv")
+testing = read.csv("C:/Francois/Francois/Coursera/John Hopkins Data Science Specialization/Final Project/pml-testing.csv")
+head(training)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+By looking at the data table manually it is quite clear that many of the columns are not populated fully. They either have blank rows or NA or "NA". I decided to classify blank values and the text "NA" as NA values as well. 
+
+```{r}
+training = read.csv("C:/Francois/Francois/Coursera/John Hopkins Data Science Specialization/Final Project/pml-training.csv", na.strings=c("", "NA"))
+testing = read.csv("C:/Francois/Francois/Coursera/John Hopkins Data Science Specialization/Final Project/pml-testing.csv", na.strings=c("", "NA"))
+```
+
+The missing values can also be visually illustrated by the following plot:
+
+```{r}
+aggr_plot <- aggr(training, col=c('Green','red'), 
+                  numbers=TRUE, sortVars=FALSE, labels=names(training), 
+                  cex.axis=.7, gap=3, ylab=c("Histogram of missing data","Pattern"))
+```
+
+Clearly the data cannot be used as is. I decided to remove columns that are likely to not add value, which I defined as columns going above some threshold of missing values as a proportion of total rows. I tested various thresholds in order to see the impact on the number of columns I would keep to model on. The df_status function shows the percentage of zeros and na's for each column. I did not display the output here as it's too many rows.
+
+```{r, results=FALSE}
+var_summary = as.data.frame(df_status(training))
+keep0 = var_summary$p_zeros == 0 & var_summary$p_na == 0
+keep5 = var_summary$p_zeros < 5 & var_summary$p_na < 5
+keep10 = var_summary$p_zeros < 10 & var_summary$p_na < 10
+```
+
+If we then count the number of columns that are kept under each scenario:
+
+```{r}
+sum(keep0)
+sum(keep5)
+sum(keep10)
+```
+
+We can see using a threshold of 0 (that is no missing values are allowed in a column) is too aggressive as only 12 columns are kept. There isn't much of a difference between the other two limits, so I'll use 5%, which makes the data more complete. In addition to this, the column labelled "X" is simply a row counter and should not have any influence on the final predictions, so I removed this column as well.
+
+```{r, results=FALSE}
+training_trimmed = subset(training, select = c(keep5))
+training_trimmed = subset(training_trimmed, select = -c(X))
+```
+
+I kept some columns that have rows with NA values and therefore I need to impute these values in order to use them in the prediction algorithms used later on. At the same time, we can use the preProcess function to center and scale the numeric variables in the data.
+
+```{r, results=FALSE}
+preProc = preProcess(training_trimmed, method = c("knnImpute","center","scale"))
+training2 = predict(preProc, training_trimmed)
+```
+
+I performed a check to see whether all the NA's were removed and replaced by values by the impute function. As the result is 0 the process ran successfully and we are ready to start modelling. 
+
+```{r}
+sum(colSums(is.na(training2)))
+```
+
+
+###Data Slicing
+The last step is to split the training data into a training and validation set for modelling purposes. This will allow us to build a model and test it on out of sample data.
+
+
+```{r}
+inTrain = createDataPartition(training2$classe, p=0.75, list=FALSE)
+trainSet = training2[inTrain,]
+valSet = training2[-inTrain,]
+training_trimmed$classe = as.factor(training$classe)
+```
+
+
+##Modelling
+
+In order to reproduce the work I set a random seed. As this is a classification problem I decided to test two different techniques that work well for these exercises. I.e. Random Forests and Gradient Boosting Method. For both models I used all the remaining variables in the data set as predictors and I used 3-fold cross validation.
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(1234)
+RF = train(classe ~ ., method="rf", data=trainSet, trControl=trainControl(method="cv", number=3))
+
+#Predict on the validation set.
+RFPred = predict(RF,valSet)
+confusionMatrix(RFPred, valSet$classe)
+```
+
+
+The model fits really well, the accuracy on the out of sample validation set is almost 100%. Now let's see how the GBM performs.
+
+```{r, message=FALSE, warning=FALSE}
+GBM = train(classe ~ ., method="gbm", data=trainSet, trControl=trainControl(method="cv", number=3), verbose=FALSE)
+
+#Predict on the validation set.
+GBMPred = predict(GBM,valSet)
+confusionMatrix(GBMPred, valSet$classe)
+```
+
+The GBM performs slightly worse on the validation set, but the accuracy is still very high at 99.5%. Therefore, the Random Forest is the preferred model to predict on the testing set.
+
+##Predict the Classe on the Testing Dataset
+
+Before we can predict values on the testing set we need to impute data for the missing values in the data. This is required in order for the data to be in a similar format to what the models were trained on above.
+
+I also wanted to test both models on the testing data to see how their answers might differ.
+
+```{r, message=FALSE, warning=FALSE}
+#Impute values on testing set.
+testing2 = predict(preProc, testing)
+
+#Predictions of the two different models.
+GBMFinalPred = predict(GBM, testing2)
+RFFinalPred = predict(RF, testing2)
+
+#Printing and comparing the results.
+print(GBMFinalPred)
+print(RFFinalPred)
+```
+
+Both models predict the same outcomes for the data, so the choice in model actually makes no difference in this case.
